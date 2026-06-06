@@ -3,46 +3,66 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>EmergeFly Flight Dashboard</title>
+    <title>EmergeFly 2.0 Flight Optimizer</title>
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
     <main class="shell">
       <section class="toolbar">
         <div>
-          <p class="eyebrow">Emergency flight scanner</p>
-          <h1>EmergeFly</h1>
+          <p class="eyebrow">Cost + speed optimizer</p>
+          <h1>EmergeFly 2.0</h1>
         </div>
         <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
           <span aria-hidden="true">◐</span>
         </button>
       </section>
 
+      <section class="objective-bar" aria-label="Optimization objective">
+        <button class="objective-pill active" type="button" data-sort="balanced">Balanced</button>
+        <button class="objective-pill" type="button" data-sort="cost">Cheapest</button>
+        <button class="objective-pill" type="button" data-sort="speed">Fastest</button>
+      </section>
+
       <form class="search-panel" id="searchForm">
         <label>
           Origin
-          <input id="origin" name="origin" maxlength="4" value="MLA" required />
+          <input id="origin" name="originIATA" maxlength="3" value="MLA" required />
         </label>
         <label>
-          Destination
-          <input id="destination" name="destination" maxlength="4" value="FCO" required />
+          Start
+          <input id="startISO" name="startISO" type="datetime-local" required />
         </label>
         <label>
-          Departure
-          <input id="departureTime" name="departureTime" type="datetime-local" required />
+          End
+          <input id="endISO" name="endISO" type="datetime-local" required />
         </label>
         <label>
-          Arrive by
-          <input id="arrivalTime" name="arrivalTime" type="datetime-local" required />
-        </label>
-        <label>
-          Priority
-          <select id="priority" name="priority">
+          Profile
+          <select id="profile" name="emergencyProfile">
+            <option value="balanced">Balanced</option>
+            <option value="budget">Budget</option>
+            <option value="fastest">Fastest</option>
             <option value="medical">Medical</option>
-            <option value="evacuation">Evacuation</option>
-            <option value="critical">Critical</option>
-            <option value="standard">Standard</option>
+            <option value="family">Family</option>
+            <option value="evac">Evacuation</option>
           </select>
+        </label>
+        <label>
+          Max stops
+          <input id="maxStops" name="maxStops" type="number" min="0" max="3" value="2" />
+        </label>
+        <label>
+          Max results
+          <input id="maxResults" name="maxResults" type="number" min="1" max="25" value="5" />
+        </label>
+        <label>
+          Max price
+          <input id="maxPrice" name="maxPriceUSD" type="number" min="1" placeholder="Any" />
+        </label>
+        <label>
+          Max duration
+          <input id="maxDuration" name="maxDurationMin" type="number" min="1" placeholder="Any" />
         </label>
         <button class="primary-button" type="submit">Search</button>
       </form>
@@ -52,6 +72,8 @@
         <span id="modeStatus"></span>
       </section>
 
+      <section class="kpi-row" id="kpis" aria-live="polite"></section>
+      <section class="warnings" id="warnings" aria-live="polite"></section>
       <section class="results-grid" id="results" aria-live="polite"></section>
     </main>
 

@@ -1,17 +1,18 @@
-import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
+from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger("emergefly")
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
@@ -19,222 +20,449 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message
 BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / "assets"
 
-OPENSKY_TOKEN_URL = (
+DEFAULT_OPENSKY_AUTH_URL = (
     "https://auth.opensky-network.org/auth/realms/opensky-network/"
     "protocol/openid-connect/token"
 )
-OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
+DEFAULT_OPENSKY_BASE_URL = "https://opensky-network.org/api"
 
-_opensky_token: str | None = None
-_opensky_token_expires_at = 0.0
+WEIGHT_PROFILES = {
+    "balanced": {"w1": 0.15, "w2": 0.10, "w3": 0.10, "w4": 0.35, "w5": 0.30},
+    "budget": {"w1": 0.15, "w2": 0.10, "w3": 0.10, "w4": 0.50, "w5": 0.15},
+    "fastest": {"w1": 0.15, "w2": 0.15, "w3": 0.10, "w4": 0.10, "w5": 0.50},
+    "medical": {"w1": 0.45, "w2": 0.25, "w3": 0.20, "w4": 0.05, "w5": 0.05},
+    "family": {"w1": 0.30, "w2": 0.20, "w3": 0.15, "w4": 0.20, "w5": 0.15},
+    "evac": {"w1": 0.40, "w2": 0.30, "w3": 0.20, "w4": 0.05, "w5": 0.05},
+}
+
+_token_cache = {"access_token": None, "expires_at": 0.0}
 _route_cache: dict[str, dict[str, Any]] = {}
+_last_degraded_mode = True
+
+
+def env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def clamp(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
+    return max(lower, min(upper, value))
+
+
+class TimeWindow(BaseModel):
+    startISO: datetime
+    endISO: datetime
+
+    @model_validator(mode="after")
+    def validate_future_window(self) -> "TimeWindow":
+        self.startISO = as_utc(self.startISO)
+        self.endISO = as_utc(self.endISO)
+        now = utc_now()
+        if self.startISO < now:
+            raise ValueError("departWindow.startISO cannot be in the past")
+        if self.endISO < now:
+            raise ValueError("departWindow.endISO cannot be in the past")
+        if self.endISO <= self.startISO:
+            raise ValueError("departWindow.endISO must be after startISO")
+        return self
 
 
 class SearchRequest(BaseModel):
-    origin: str = Field(default="MLA", min_length=3, max_length=4)
-    destination: str = Field(default="FCO", min_length=3, max_length=4)
-    departureTime: datetime | None = None
-    arrivalTime: datetime | None = None
-    priority: str = "medical"
+    originIATA: str = "MLA"
+    departWindow: TimeWindow
+    maxStops: int = Field(default=2, ge=0, le=3)
+    maxResults: int = Field(default_factory=lambda: env_int("MAX_RESULTS", 5), ge=1, le=25)
+    emergencyProfile: str = "balanced"
+    sortBy: Literal["cost", "speed", "balanced"] = "balanced"
+    maxPriceUSD: float | None = Field(default=None, gt=0)
+    maxDurationMin: int | None = Field(default=None, gt=0)
+
+    @field_validator("originIATA")
+    @classmethod
+    def validate_iata(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", normalized):
+            raise ValueError("originIATA must be a 3-letter IATA code")
+        return normalized
+
+    @field_validator("emergencyProfile")
+    @classmethod
+    def validate_profile(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in WEIGHT_PROFILES:
+            raise ValueError(f"emergencyProfile must be one of {', '.join(WEIGHT_PROFILES)}")
+        return normalized
 
 
-class RouteOption(BaseModel):
-    id: str
-    airline: str
+class LiveState(BaseModel):
+    icao24: str | None = None
+    callsign: str
+    lat: float | None = None
+    lon: float | None = None
+    groundSpeed: float | None = None
+    baroAltitudeM: float | None = None
+    onGround: bool | None = None
+    lastContactUnix: int | None = None
+    spi: bool = False
+    source: Literal["opensky", "mock", "missing"] = "missing"
+    fresh: bool = False
+
+
+class Leg(BaseModel):
     flightNumber: str
+    airline: str
     origin: str
     destination: str
-    departureTime: datetime
-    arrivalTime: datetime
-    durationMinutes: int
-    stops: int
+    departureISO: datetime
+    arrivalISO: datetime
+    durationMin: int
     aircraft: str
-    status: str
-    score: float
-    scoreBreakdown: dict[str, float]
-    source: str
+    liveState: LiveState | None = None
+
+
+class RouteScores(BaseModel):
+    reliability: float
+    transferScore: float
+    delayRisk: float
+    costScore: float
+    durationScore: float
+    overall: float
+
+
+class DataCompleteness(BaseModel):
+    schedule: Literal["mock", "aviationstack", "flightaware"]
+    liveState: Literal["opensky", "mock", "missing"]
+    matchedLiveLegs: int
+    totalLegs: int
+
+
+class RouteSummary(BaseModel):
+    routeId: str
+    totalDurationMin: int
+    arrivalETA: datetime
+    priceUSD: float
+    stops: int
+    overallScore: float
+    costRank: int = 0
+    speedRank: int = 0
+    confidence: float
+    topReasons: list[str]
+    topRisks: list[str]
+    scores: RouteScores
+    legs: list[Leg]
+    dataCompleteness: DataCompleteness
 
 
 class SearchResponse(BaseModel):
-    query: SearchRequest
+    queryId: str
+    generatedAt: datetime
+    originIATA: str
+    sortBy: str
     degradedMode: bool
-    scheduleProvider: str
-    stateProvider: str
-    routes: list[RouteOption]
+    warnings: list[str]
+    results: list[RouteSummary]
 
 
 class ScheduleProvider(Protocol):
-    name: str
+    name: Literal["mock", "aviationstack", "flightaware"]
 
     async def search(self, request: SearchRequest) -> list[dict[str, Any]]:
         ...
 
 
-def opensky_credentials_configured() -> bool:
+def compute_reliability(p_ontime: float, c_cancel: float) -> float:
+    return round(clamp(100 * p_ontime * (1 - c_cancel)), 4)
+
+
+def compute_transfer_score(layover_min: int, mct: int, buffer: int, n_transfers: int) -> float:
+    if n_transfers == 0:
+        return 100.0
+    if layover_min < mct:
+        return 0.0
+    score = 100 * min(1, (layover_min - mct) / max(buffer, 1)) * (1 / (1 + n_transfers))
+    return round(clamp(score), 4)
+
+
+def compute_delay_risk(p_ontime: float, avg_delay_min: float) -> float:
+    return round(clamp(100 * (1 - p_ontime) * (1 + min(avg_delay_min, 180) / 60)), 4)
+
+
+def compute_cost_score(price: float, min_price: float, max_price: float) -> float:
+    return round(clamp(100 * (1 - (price - min_price) / (max_price - min_price + 1e-5))), 4)
+
+
+def compute_duration_score(duration_min: int, min_dur: int, max_dur: int) -> float:
+    return round(clamp(100 * (1 - (duration_min - min_dur) / (max_dur - min_dur + 1e-5))), 4)
+
+
+def compute_overall_score(scores: dict[str, float], weights: dict[str, float]) -> float:
+    overall = (
+        weights["w1"] * scores["reliability"]
+        + weights["w2"] * scores["transferScore"]
+        + weights["w3"] * (100 - scores["delayRisk"])
+        + weights["w4"] * scores["costScore"]
+        + weights["w5"] * scores["durationScore"]
+    )
+    return round(clamp(overall), 2)
+
+
+def opensky_live_ready() -> bool:
     return bool(os.getenv("OPENSKY_CLIENT_ID") and os.getenv("OPENSKY_CLIENT_SECRET"))
 
 
 async def get_opensky_token() -> str | None:
-    """Fetches and caches an OpenSky OAuth2 token with a 60-second expiry buffer."""
-    global _opensky_token, _opensky_token_expires_at
-    if not opensky_credentials_configured():
+    """Fetch and cache an OpenSky OAuth token with a 60-second refresh buffer."""
+    now = time.time()
+    if _token_cache["access_token"] and float(_token_cache["expires_at"]) > now + 60:
+        return str(_token_cache["access_token"])
+    if not opensky_live_ready():
         return None
 
-    now = time.time()
-    if _opensky_token and now < _opensky_token_expires_at:
-        return _opensky_token
-
+    auth_url = os.getenv("OPENSKY_AUTH_URL", DEFAULT_OPENSKY_AUTH_URL)
     payload = {
         "grant_type": "client_credentials",
         "client_id": os.environ["OPENSKY_CLIENT_ID"],
         "client_secret": os.environ["OPENSKY_CLIENT_SECRET"],
     }
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(OPENSKY_TOKEN_URL, data=payload)
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(auth_url, data=payload)
             response.raise_for_status()
             data = response.json()
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("OpenSky token request failed; falling back to mock state data: %s", exc)
+        logger.warning("OpenSky token request failed: %s", exc)
         return None
 
     token = data.get("access_token")
-    expires_in = int(data.get("expires_in", 0))
-    if not token or expires_in <= 0:
-        logger.warning("OpenSky token response was incomplete; falling back to mock state data")
-        return None
-
-    _opensky_token = token
-    _opensky_token_expires_at = now + max(expires_in - 60, 0)
-    return _opensky_token
-
-
-async def fetch_opensky_states() -> tuple[list[dict[str, Any]], bool]:
-    """Retrieves live OpenSky state vectors, or mock data when live mode is unavailable."""
-    token = await get_opensky_token()
     if not token:
-        return mock_state_vectors(), True
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(OPENSKY_STATES_URL, headers={"Authorization": f"Bearer {token}"})
-            response.raise_for_status()
-            data = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("OpenSky state request failed; falling back to mock state data: %s", exc)
-        return mock_state_vectors(), True
-
-    states = data.get("states") or []
-    mapped = [
-        {
-            "icao24": row[0],
-            "callsign": (row[1] or "").strip(),
-            "longitude": row[5],
-            "latitude": row[6],
-            "altitude": row[7],
-            "velocity": row[9],
-        }
-        for row in states
-        if len(row) > 9
-    ]
-    return mapped, False
+        logger.warning("OpenSky token response did not include access_token")
+        return None
+    _token_cache["access_token"] = token
+    _token_cache["expires_at"] = now + int(data.get("expires_in", 1800))
+    return str(token)
 
 
-def mock_state_vectors() -> list[dict[str, Any]]:
-    """Provides predictable aircraft state data when OpenSky cannot be reached."""
+def map_opensky_state(item: list[Any], source: Literal["opensky", "mock"]) -> LiveState:
+    return LiveState(
+        icao24=item[0],
+        callsign=(item[1] or "").strip(),
+        lat=item[6],
+        lon=item[5],
+        groundSpeed=item[9],
+        baroAltitudeM=item[7],
+        onGround=bool(item[8]),
+        lastContactUnix=item[4],
+        spi=bool(item[15]) if len(item) > 15 else False,
+        source=source,
+        fresh=bool(item[4] and utc_now().timestamp() - int(item[4]) < 900),
+    )
+
+
+def mock_opensky_state_rows() -> list[list[Any]]:
+    now = int(utc_now().timestamp())
     return [
-        {
-            "icao24": "4d2211",
-            "callsign": "EMF101",
-            "longitude": 14.45,
-            "latitude": 35.9,
-            "altitude": 10668,
-            "velocity": 230,
-        },
-        {
-            "icao24": "4ca7b3",
-            "callsign": "EMF202",
-            "longitude": 12.5,
-            "latitude": 41.8,
-            "altitude": 9144,
-            "velocity": 210,
-        },
+        ["4d2211", "AI101", None, now - 60, now - 45, 77.1, 23.8, 10972, False, 239, 90, 0, None, 11200, None, False],
+        ["4ca7b3", "TK721", None, now - 80, now - 55, 28.9, 41.2, 10340, False, 232, 120, 0, None, 10600, None, False],
+        ["4b9901", "LH765", None, now - 40, now - 30, 13.4, 47.1, 11200, False, 245, 110, 0, None, 11300, None, False],
+        ["4d2260", "KM614", None, now - 70, now - 50, 12.2, 42.3, 9800, False, 210, 80, 0, None, 10000, None, False],
+        ["7102aa", "EK112", None, now - 5000, now - 4900, 55.1, 25.2, 10800, False, 238, 100, 0, None, 10950, None, False],
     ]
 
 
-def normalize_airport(value: str) -> str:
-    return value.strip().upper()
+async def fetch_opensky_states(callsigns: set[str]) -> tuple[dict[str, LiveState], bool, list[str]]:
+    """Return OpenSky states keyed by callsign, matching live data to scheduled legs."""
+    token = await get_opensky_token()
+    degraded = False
+    warnings: list[str] = []
+    source: Literal["opensky", "mock"] = "opensky"
+
+    if token:
+        base_url = os.getenv("OPENSKY_BASE_URL", DEFAULT_OPENSKY_BASE_URL).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.get(f"{base_url}/states/all", headers={"Authorization": f"Bearer {token}"})
+                response.raise_for_status()
+                rows = response.json().get("states") or []
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("OpenSky state request failed: %s", exc)
+            rows = mock_opensky_state_rows()
+            source = "mock"
+            degraded = True
+            warnings.append("OpenSky request failed - using mock live states.")
+    else:
+        rows = mock_opensky_state_rows()
+        source = "mock"
+        degraded = True
+        warnings.append("OpenSky credentials missing - using mock live states.")
+
+    states: dict[str, LiveState] = {}
+    for row in rows:
+        if len(row) <= 9:
+            continue
+        state = map_opensky_state(row, source)
+        if state.callsign in callsigns:
+            states[state.callsign] = state
+    return states, degraded, warnings
 
 
-def score_route(route: dict[str, Any], priority: str) -> tuple[float, dict[str, float]]:
-    """Scores routes for emergency travel using duration, stops, reliability, and urgency."""
-    duration_score = max(0, 100 - (route["durationMinutes"] / 6))
-    stop_score = max(0, 100 - (route["stops"] * 30))
-    reliability_score = route.get("reliability", 82)
-    status_score = 100 if route.get("status") in {"scheduled", "boarding", "in-air"} else 65
-
-    priority_weight = 1.12 if priority in {"medical", "critical", "evacuation"} else 1.0
-    breakdown = {
-        "duration": round(duration_score, 2),
-        "stops": round(stop_score, 2),
-        "reliability": round(reliability_score, 2),
-        "status": round(status_score, 2),
+def leg(
+    flight: str,
+    airline: str,
+    origin: str,
+    destination: str,
+    depart: datetime,
+    duration_min: int,
+    aircraft: str,
+) -> dict[str, Any]:
+    return {
+        "flightNumber": flight,
+        "airline": airline,
+        "origin": origin,
+        "destination": destination,
+        "departureISO": depart,
+        "arrivalISO": depart + timedelta(minutes=duration_min),
+        "durationMin": duration_min,
+        "aircraft": aircraft,
     }
-    score = (
-        duration_score * 0.42
-        + stop_score * 0.24
-        + reliability_score * 0.22
-        + status_score * 0.12
-    ) * priority_weight
-    return round(min(score, 100), 2), breakdown
 
 
-def build_mock_routes(request: SearchRequest) -> list[dict[str, Any]]:
-    """Keeps the mock schedule data available for local use and degraded mode."""
-    origin = normalize_airport(request.origin)
-    destination = normalize_airport(request.destination)
-    departure = request.departureTime or datetime.now(timezone.utc) + timedelta(hours=1)
-
-    templates = [
-        ("EMF101", "EmergeFly Air", 95, 0, 145, "A320neo", "scheduled"),
-        ("MED214", "MedLink Express", 88, 0, 160, "B737-800", "boarding"),
-        ("SKY330", "SkyBridge", 76, 1, 235, "A321", "scheduled"),
-        ("RES909", "RescueJet", 84, 1, 260, "E190", "scheduled"),
+def route_layovers(legs: list[dict[str, Any]]) -> list[int]:
+    return [
+        int((legs[index + 1]["departureISO"] - legs[index]["arrivalISO"]).total_seconds() / 60)
+        for index in range(len(legs) - 1)
     ]
-    routes: list[dict[str, Any]] = []
-    for index, (flight, airline, reliability, stops, duration, aircraft, status) in enumerate(templates, 1):
-        offset = timedelta(minutes=35 * (index - 1))
-        route_departure = departure + offset
-        route_arrival = route_departure + timedelta(minutes=duration)
-        routes.append(
-            {
-                "id": f"{origin}-{destination}-{flight}".lower(),
-                "airline": airline,
-                "flightNumber": flight,
-                "origin": origin,
-                "destination": destination,
-                "departureTime": route_departure,
-                "arrivalTime": route_arrival,
-                "durationMinutes": duration,
-                "stops": stops,
-                "aircraft": aircraft,
-                "status": status,
-                "reliability": reliability,
-                "source": "mock",
-            }
-        )
-    return routes
+
+
+def total_duration(legs: list[dict[str, Any]]) -> int:
+    return int((legs[-1]["arrivalISO"] - legs[0]["departureISO"]).total_seconds() / 60)
+
+
+def build_route(
+    route_id: str,
+    price: float,
+    p_ontime: float,
+    c_cancel: float,
+    avg_delay_min: float,
+    legs: list[dict[str, Any]],
+    provider: str,
+) -> dict[str, Any]:
+    return {
+        "routeId": route_id,
+        "priceUSD": price,
+        "pOnTime": p_ontime,
+        "cancelRisk": c_cancel,
+        "avgDelayMin": avg_delay_min,
+        "legs": legs,
+        "stops": len(legs) - 1,
+        "totalDurationMin": total_duration(legs),
+        "arrivalETA": legs[-1]["arrivalISO"],
+        "provider": provider,
+    }
+
+
+def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
+    """Create deterministic mock routes whose times are derived from the search window."""
+    start = request.departWindow.startISO
+    origin = request.originIATA
+    return [
+        build_route(
+            "R-001",
+            850,
+            0.90,
+            0.03,
+            18,
+            [leg("AI101", "Air India", origin, "DEL", start + timedelta(minutes=30), 480, "B787-9")],
+            "mock",
+        ),
+        build_route(
+            "R-002",
+            620,
+            0.88,
+            0.02,
+            22,
+            [
+                leg("TK721", "Turkish Airlines", origin, "IST", start + timedelta(minutes=45), 150, "A321"),
+                leg("TK716", "Turkish Airlines", "IST", "DEL", start + timedelta(minutes=45 + 150 + 120), 510, "A330"),
+            ],
+            "mock",
+        ),
+        build_route(
+            "R-003",
+            500,
+            0.84,
+            0.04,
+            36,
+            [
+                leg("EK112", "Emirates", origin, "DXB", start + timedelta(minutes=50), 410, "B777"),
+                leg("EK512", "Emirates", "DXB", "DEL", start + timedelta(minutes=50 + 410 + 45), 85, "B777"),
+            ],
+            "mock",
+        ),
+        build_route(
+            "R-004",
+            1100,
+            0.93,
+            0.01,
+            12,
+            [leg("LH765", "Lufthansa", origin, "BLR", start + timedelta(minutes=90), 480, "A350")],
+            "mock",
+        ),
+        build_route(
+            "R-005",
+            420,
+            0.76,
+            0.08,
+            44,
+            [
+                leg("A3621", "Aegean", origin, "ATH", start + timedelta(minutes=120), 95, "A320"),
+                leg("AI172", "Air India", "ATH", "BOM", start + timedelta(minutes=120 + 95 + 150), 465, "B787"),
+                leg("AI241", "Air India", "BOM", "DEL", start + timedelta(minutes=120 + 95 + 150 + 465 + 110), 110, "A320"),
+            ],
+            "mock",
+        ),
+        build_route(
+            "R-006",
+            710,
+            0.86,
+            0.03,
+            28,
+            [
+                leg("KM614", "KM Malta Airlines", origin, "FCO", start + timedelta(minutes=75), 85, "A320"),
+                leg("AI148", "Air India", "FCO", "DEL", start + timedelta(minutes=75 + 85 + 135), 585, "B787"),
+            ],
+            "mock",
+        ),
+    ]
 
 
 class MockScheduleProvider:
-    name = "mock"
+    name: Literal["mock"] = "mock"
 
     async def search(self, request: SearchRequest) -> list[dict[str, Any]]:
-        return build_mock_routes(request)
+        return build_mock_schedule(request)
 
 
 class StubScheduleProvider:
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: Literal["aviationstack", "flightaware"]) -> None:
         self.name = name
 
     async def search(self, request: SearchRequest) -> list[dict[str, Any]]:
@@ -245,7 +473,6 @@ class StubScheduleProvider:
 
 
 def get_schedule_provider() -> ScheduleProvider:
-    """Selects the schedule provider requested by SCHEDULE_PROVIDER."""
     provider_name = os.getenv("SCHEDULE_PROVIDER", "mock").strip().lower()
     if provider_name == "aviationstack":
         return StubScheduleProvider("aviationstack")
@@ -256,21 +483,180 @@ def get_schedule_provider() -> ScheduleProvider:
     return MockScheduleProvider()
 
 
-def enrich_routes(routes: list[dict[str, Any]], request: SearchRequest) -> list[RouteOption]:
-    """Applies scoring and caches route details for /route/{id} lookups."""
-    enriched: list[RouteOption] = []
+def build_explanations(
+    route: dict[str, Any],
+    scores: dict[str, float],
+    live_states: dict[str, LiveState],
+    state_degraded: bool,
+) -> tuple[list[str], list[str], float, DataCompleteness]:
+    reasons = [
+        f"Price ${route['priceUSD']:.0f} (cost score {scores['costScore']:.0f}/100)",
+        f"Total duration {route['totalDurationMin']}m (speed score {scores['durationScore']:.0f}/100)",
+    ]
+    risks: list[str] = []
+    layovers = route_layovers(route["legs"])
+    if layovers:
+        reasons.append(f"Safest layover {min(layovers)}m")
+    if scores["delayRisk"] > 40:
+        risks.append(f"Elevated delay risk {scores['delayRisk']:.0f}/100")
+
+    matched = sum(1 for item in route["legs"] if item["flightNumber"] in live_states)
+    if state_degraded:
+        risks.append("OpenSky data missing - schedule ETA only")
+    elif matched < len(route["legs"]):
+        risks.append("Some legs are missing live OpenSky state matches")
+    else:
+        reasons.append("All legs matched current OpenSky callsign data")
+
+    if matched == len(route["legs"]):
+        sky_bonus = 1.0
+        live_source: Literal["opensky", "mock", "missing"] = next(iter(live_states.values())).source if live_states else "missing"
+    elif matched > 0:
+        sky_bonus = 0.75
+        live_source = "mock" if state_degraded else "opensky"
+    else:
+        sky_bonus = 0.5
+        live_source = "missing"
+
+    completeness = DataCompleteness(
+        schedule=route["provider"],
+        liveState=live_source,
+        matchedLiveLegs=matched,
+        totalLegs=len(route["legs"]),
+    )
+    return reasons[:3], risks[:3], round(scores["overall"] * sky_bonus, 2), completeness
+
+
+def materialize_route(
+    route: dict[str, Any],
+    scores: RouteScores,
+    live_states: dict[str, LiveState],
+    state_degraded: bool,
+) -> RouteSummary:
+    legs = []
+    for item in route["legs"]:
+        state = live_states.get(item["flightNumber"])
+        legs.append(Leg(**item, liveState=state))
+    reasons, risks, confidence, completeness = build_explanations(route, scores.model_dump(), live_states, state_degraded)
+    return RouteSummary(
+        routeId=route["routeId"],
+        totalDurationMin=route["totalDurationMin"],
+        arrivalETA=route["arrivalETA"],
+        priceUSD=route["priceUSD"],
+        stops=route["stops"],
+        overallScore=scores.overall,
+        confidence=confidence,
+        topReasons=reasons,
+        topRisks=risks,
+        scores=scores,
+        legs=legs,
+        dataCompleteness=completeness,
+    )
+
+
+async def run_search(request: SearchRequest) -> SearchResponse:
+    provider = get_schedule_provider()
+    warnings: list[str] = []
+    candidates = await provider.search(request)
+    schedule_degraded = provider.name != "mock"
+    if not candidates:
+        warnings.append(f"{provider.name} schedule provider returned no routes - using mock schedule.")
+        candidates = build_mock_schedule(request)
+        schedule_degraded = True
+
+    filtered = [
+        route
+        for route in candidates
+        if route["stops"] <= request.maxStops
+        and (request.maxPriceUSD is None or route["priceUSD"] <= request.maxPriceUSD)
+        and (request.maxDurationMin is None or route["totalDurationMin"] <= request.maxDurationMin)
+    ]
+
+    if not filtered:
+        warnings.append("No routes survived price, stop, or duration filters.")
+        return SearchResponse(
+            queryId=str(uuid4()),
+            generatedAt=utc_now(),
+            originIATA=request.originIATA,
+            sortBy=request.sortBy,
+            degradedMode=True,
+            warnings=warnings,
+            results=[],
+        )
+
+    callsigns = {item["flightNumber"] for route in filtered for item in route["legs"]}
+    live_states, state_degraded, state_warnings = await fetch_opensky_states(callsigns)
+    warnings.extend(state_warnings)
+
+    min_price = min(route["priceUSD"] for route in filtered)
+    max_price = max(route["priceUSD"] for route in filtered)
+    min_dur = min(route["totalDurationMin"] for route in filtered)
+    max_dur = max(route["totalDurationMin"] for route in filtered)
+    weights = WEIGHT_PROFILES[request.emergencyProfile]
+    mct = env_int("DEFAULT_MCT_INTL_INTL", 90)
+    buffer = env_int("BUFFER_MINUTES", 60)
+    min_reliability = env_float("MIN_RELIABILITY", 50.0)
+
+    survivors: list[RouteSummary] = []
+    for route in filtered:
+        reliability = compute_reliability(route["pOnTime"], route["cancelRisk"])
+        if reliability < min_reliability:
+            warnings.append(f"{route['routeId']} pruned: reliability {reliability:.1f} below minimum {min_reliability:.1f}.")
+            continue
+
+        layovers = route_layovers(route["legs"])
+        transfer_score = 100.0
+        if layovers:
+            transfer_score = min(
+                compute_transfer_score(layover, mct, buffer, route["stops"])
+                for layover in layovers
+            )
+        if transfer_score == 0 and route["stops"] > 0:
+            warnings.append(f"{route['routeId']} pruned: minimum connection time violated.")
+            continue
+
+        score_map = {
+            "reliability": reliability,
+            "transferScore": transfer_score,
+            "delayRisk": compute_delay_risk(route["pOnTime"], route["avgDelayMin"]),
+            "costScore": compute_cost_score(route["priceUSD"], min_price, max_price),
+            "durationScore": compute_duration_score(route["totalDurationMin"], min_dur, max_dur),
+        }
+        score_map["overall"] = compute_overall_score(score_map, weights)
+        survivors.append(materialize_route(route, RouteScores(**score_map), live_states, state_degraded))
+
+    for rank, route in enumerate(sorted(survivors, key=lambda item: item.priceUSD), 1):
+        route.costRank = rank
+    for rank, route in enumerate(sorted(survivors, key=lambda item: item.totalDurationMin), 1):
+        route.speedRank = rank
+
+    if request.sortBy == "cost":
+        survivors.sort(key=lambda item: item.priceUSD)
+    elif request.sortBy == "speed":
+        survivors.sort(key=lambda item: item.totalDurationMin)
+    else:
+        survivors.sort(key=lambda item: item.overallScore, reverse=True)
+
+    survivors = survivors[: request.maxResults]
     _route_cache.clear()
-    for route in routes:
-        score, breakdown = score_route(route, request.priority)
-        route_data = {**route, "score": score, "scoreBreakdown": breakdown}
-        option = RouteOption(**route_data)
-        enriched.append(option)
-        _route_cache[option.id] = option.model_dump(mode="json")
-    enriched.sort(key=lambda item: item.score, reverse=True)
-    return enriched
+    for route in survivors:
+        _route_cache[route.routeId] = route.model_dump(mode="json")
+
+    degraded = state_degraded or schedule_degraded
+    global _last_degraded_mode
+    _last_degraded_mode = degraded
+    return SearchResponse(
+        queryId=str(uuid4()),
+        generatedAt=utc_now(),
+        originIATA=request.originIATA,
+        sortBy=request.sortBy,
+        degradedMode=degraded,
+        warnings=warnings,
+        results=survivors,
+    )
 
 
-app = FastAPI(title="EmergeFly Flight Dashboard", version="1.0.0")
+app = FastAPI(title="EmergeFly Flight Optimizer", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -289,44 +675,25 @@ async def index() -> FileResponse:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    """Reports runtime health and whether live OpenSky credentials are configured."""
     provider = get_schedule_provider()
     return {
-        "ok": True,
-        "service": "EmergeFly",
-        "openskyConfigured": opensky_credentials_configured(),
-        "scheduleProvider": provider.name,
-        "time": datetime.now(timezone.utc).isoformat(),
+        "status": "ok",
+        "time": utc_now().isoformat(),
+        "routes_cached": len(_route_cache),
+        "degraded_mode": _last_degraded_mode,
+        "opensky_live_ready": opensky_live_ready(),
+        "schedule_provider": provider.name,
+        "profiles_available": list(WEIGHT_PROFILES.keys()),
     }
 
 
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest) -> SearchResponse:
-    """Searches schedules and marks degradedMode when mock state data is in use."""
-    provider = get_schedule_provider()
-    states_task = asyncio.create_task(fetch_opensky_states())
-    schedule_routes = await provider.search(request)
-    states, state_degraded = await states_task
-
-    if not schedule_routes:
-        schedule_routes = build_mock_routes(request)
-        schedule_degraded = provider.name != "mock"
-    else:
-        schedule_degraded = provider.name == "mock"
-
-    routes = enrich_routes(schedule_routes, request)
-    return SearchResponse(
-        query=request,
-        degradedMode=state_degraded or schedule_degraded,
-        scheduleProvider=provider.name,
-        stateProvider="mock" if state_degraded else "opensky",
-        routes=routes,
-    )
+    return await run_search(request)
 
 
 @app.get("/route/{route_id}")
 async def route_detail(route_id: str) -> dict[str, Any]:
-    """Returns the latest cached route detail from a previous search."""
     route = _route_cache.get(route_id)
     if not route:
         raise HTTPException(status_code=404, detail="Route not found. Run /search first.")

@@ -1,8 +1,13 @@
 const form = document.querySelector("#searchForm");
 const results = document.querySelector("#results");
+const warningsBox = document.querySelector("#warnings");
+const kpis = document.querySelector("#kpis");
 const healthStatus = document.querySelector("#healthStatus");
 const modeStatus = document.querySelector("#modeStatus");
 const themeToggle = document.querySelector("#themeToggle");
+const objectiveButtons = document.querySelectorAll("[data-sort]");
+
+let activeSortBy = "balanced";
 
 const formatDateForInput = (date) => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -15,59 +20,138 @@ const formatTime = (value) =>
     timeStyle: "short",
   }).format(new Date(value));
 
+const minutesLabel = (minutes) => `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+
 const setDefaultTimes = () => {
   const now = new Date();
-  const later = new Date(now.getTime() + 12 * 60 * 60 * 1000);
-  document.querySelector("#departureTime").value = formatDateForInput(now);
-  document.querySelector("#arrivalTime").value = formatDateForInput(later);
+  const start = new Date(now.getTime() + 30 * 60 * 1000);
+  const end = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+  const min = formatDateForInput(now);
+  document.querySelector("#startISO").min = min;
+  document.querySelector("#endISO").min = min;
+  document.querySelector("#startISO").value = formatDateForInput(start);
+  document.querySelector("#endISO").value = formatDateForInput(end);
 };
 
 const checkHealth = async () => {
   try {
     const response = await fetch("/health");
     const data = await response.json();
-    healthStatus.textContent = data.ok
-      ? `Service online · OpenSky ${data.openskyConfigured ? "configured" : "mock mode"}`
-      : "Service unavailable";
-    modeStatus.textContent = `Schedule provider: ${data.scheduleProvider}`;
+    healthStatus.textContent =
+      data.status === "ok"
+        ? `Service online · OpenSky ${data.opensky_live_ready ? "ready" : "mock mode"}`
+        : "Service unavailable";
+    modeStatus.textContent = `Provider: ${data.schedule_provider} · Profiles: ${data.profiles_available.length}`;
   } catch (error) {
     healthStatus.textContent = "Service unavailable";
     modeStatus.textContent = "";
   }
 };
 
-const renderRoutes = (payload) => {
-  modeStatus.textContent = `${payload.degradedMode ? "Degraded" : "Live"} · ${payload.scheduleProvider} schedule · ${payload.stateProvider} states`;
+const buildPayload = () => {
+  const startValue = document.querySelector("#startISO").value;
+  const endValue = document.querySelector("#endISO").value;
+  const start = new Date(startValue);
+  const end = new Date(endValue);
+  const now = new Date();
 
-  if (!payload.routes.length) {
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    throw new Error("Choose a valid departure window.");
+  }
+  if (start < now || end < now) {
+    throw new Error("Departure window cannot be in the past.");
+  }
+  if (end <= start) {
+    throw new Error("End time must be after the start time.");
+  }
+
+  const payload = {
+    originIATA: document.querySelector("#origin").value.trim().toUpperCase(),
+    emergencyProfile: document.querySelector("#profile").value,
+    maxStops: Number(document.querySelector("#maxStops").value),
+    maxResults: Number(document.querySelector("#maxResults").value),
+    sortBy: activeSortBy,
+    departWindow: {
+      startISO: start.toISOString(),
+      endISO: end.toISOString(),
+    },
+  };
+
+  const maxPrice = Number.parseFloat(document.querySelector("#maxPrice").value);
+  const maxDuration = Number.parseInt(document.querySelector("#maxDuration").value, 10);
+  if (!Number.isNaN(maxPrice) && maxPrice > 0) {
+    payload.maxPriceUSD = maxPrice;
+  }
+  if (!Number.isNaN(maxDuration) && maxDuration > 0) {
+    payload.maxDurationMin = maxDuration;
+  }
+  return payload;
+};
+
+const renderWarnings = (warnings) => {
+  warningsBox.innerHTML = warnings.length
+    ? warnings.map((warning) => `<span class="warning-chip">${warning}</span>`).join("")
+    : "";
+};
+
+const renderKpis = (routes) => {
+  if (!routes.length) {
+    kpis.innerHTML = "";
+    return;
+  }
+  const cheapest = routes.reduce((best, route) => (route.priceUSD < best.priceUSD ? route : best));
+  const fastest = routes.reduce((best, route) => (route.totalDurationMin < best.totalDurationMin ? route : best));
+  const best = routes.reduce((winner, route) => (route.overallScore > winner.overallScore ? route : winner));
+  kpis.innerHTML = `
+    <div><strong>$${cheapest.priceUSD}</strong><span>Cheapest · ${cheapest.routeId}</span></div>
+    <div><strong>${minutesLabel(fastest.totalDurationMin)}</strong><span>Fastest · ${fastest.routeId}</span></div>
+    <div><strong>${best.overallScore}</strong><span>Best score · ${best.routeId}</span></div>
+  `;
+};
+
+const renderRoutes = (payload) => {
+  modeStatus.textContent = `${payload.degradedMode ? "Degraded" : "Live"} · sorted by ${payload.sortBy}`;
+  renderWarnings(payload.warnings);
+  renderKpis(payload.results);
+
+  if (!payload.results.length) {
     results.innerHTML = '<div class="empty">No routes found for this search.</div>';
     return;
   }
 
-  results.innerHTML = payload.routes
-    .map(
-      (route) => `
-        <article class="route-card" data-route-id="${route.id}">
+  results.innerHTML = payload.results
+    .map((route) => {
+      const firstLeg = route.legs[0];
+      const lastLeg = route.legs[route.legs.length - 1];
+      return `
+        <article class="route-card" data-route-id="${route.routeId}">
           <header>
             <div>
-              <h2>${route.airline} ${route.flightNumber}</h2>
-              <span>${route.origin} to ${route.destination}</span>
+              <h2>${route.routeId} · ${firstLeg.origin} to ${lastLeg.destination}</h2>
+              <span>${route.legs.map((leg) => leg.airline).join(" + ")}</span>
             </div>
-            <div class="score">${route.score}</div>
+            <div class="score">${route.overallScore}</div>
           </header>
           <div class="meta">
-            <span><strong>${formatTime(route.departureTime)}</strong>Depart</span>
-            <span><strong>${formatTime(route.arrivalTime)}</strong>Arrive</span>
-            <span><strong>${Math.floor(route.durationMinutes / 60)}h ${route.durationMinutes % 60}m</strong>Duration</span>
+            <span><strong>$${route.priceUSD}</strong>Price</span>
+            <span><strong>${minutesLabel(route.totalDurationMin)}</strong>Duration</span>
             <span><strong>${route.stops}</strong>Stops</span>
-            <span><strong>${route.aircraft}</strong>Aircraft</span>
-            <span><strong>${route.status}</strong>Status</span>
+            <span><strong>#${route.costRank}</strong>Cost rank</span>
+            <span><strong>#${route.speedRank}</strong>Speed rank</span>
+            <span><strong>${route.confidence}</strong>Confidence</span>
           </div>
-          ${payload.degradedMode ? '<span class="badge">Mock-assisted result</span>' : ""}
-          <button class="secondary-button" type="button" data-route-detail="${route.id}">Details</button>
+          <div class="timeline">
+            <span>${formatTime(firstLeg.departureISO)}</span>
+            <span>${formatTime(route.arrivalETA)}</span>
+          </div>
+          <div class="chips">
+            ${route.topReasons.map((reason) => `<span class="badge">${reason}</span>`).join("")}
+            ${route.topRisks.map((risk) => `<span class="risk">${risk}</span>`).join("")}
+          </div>
+          <button class="secondary-button" type="button" data-route-detail="${route.routeId}">Details</button>
         </article>
-      `
-    )
+      `;
+    })
     .join("");
 };
 
@@ -79,13 +163,13 @@ const loadRouteDetail = async (routeId, button) => {
       throw new Error(`Route lookup failed with ${response.status}`);
     }
     const route = await response.json();
-    button.closest(".route-card").querySelector(".badge")?.remove();
+    const live = route.dataCompleteness;
     button.insertAdjacentHTML(
       "beforebegin",
-      `<span class="badge">${route.source} source · ${route.aircraft}</span>`
+      `<span class="badge">${live.matchedLiveLegs}/${live.totalLegs} live state matches · ${live.liveState}</span>`
     );
   } catch (error) {
-    button.insertAdjacentHTML("beforebegin", '<span class="badge">Detail unavailable</span>');
+    button.insertAdjacentHTML("beforebegin", '<span class="risk">Detail unavailable</span>');
   } finally {
     button.disabled = false;
   }
@@ -93,16 +177,17 @@ const loadRouteDetail = async (routeId, button) => {
 
 const submitSearch = async (event) => {
   event.preventDefault();
-  results.innerHTML = '<div class="empty">Searching emergency-ready routes...</div>';
+  results.innerHTML = '<div class="empty">Optimizing cost, speed, and connection safety...</div>';
+  warningsBox.innerHTML = "";
+  kpis.innerHTML = "";
 
-  const formData = new FormData(form);
-  const body = {
-    origin: formData.get("origin"),
-    destination: formData.get("destination"),
-    departureTime: new Date(formData.get("departureTime")).toISOString(),
-    arrivalTime: new Date(formData.get("arrivalTime")).toISOString(),
-    priority: formData.get("priority"),
-  };
+  let body;
+  try {
+    body = buildPayload();
+  } catch (error) {
+    results.innerHTML = `<div class="empty">${error.message}</div>`;
+    return;
+  }
 
   try {
     const response = await fetch("/search", {
@@ -110,14 +195,22 @@ const submitSearch = async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    const payload = await response.json();
     if (!response.ok) {
-      throw new Error(`Search failed with ${response.status}`);
+      throw new Error(payload.detail?.[0]?.msg || "Search failed.");
     }
-    renderRoutes(await response.json());
+    renderRoutes(payload);
   } catch (error) {
-    results.innerHTML = '<div class="empty">Search failed. Check that the backend is running.</div>';
+    results.innerHTML = `<div class="empty">${error.message}</div>`;
   }
 };
+
+objectiveButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    activeSortBy = button.dataset.sort;
+    objectiveButtons.forEach((item) => item.classList.toggle("active", item === button));
+  });
+});
 
 themeToggle.addEventListener("click", () => {
   const html = document.documentElement;
