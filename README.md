@@ -36,6 +36,7 @@ Open `http://127.0.0.1:8080`.
 | --- | --- | --- |
 | `OPENSKY_CLIENT_ID` | empty | OpenSky OAuth2 client ID. Missing credentials use anonymous OpenSky lookup first. |
 | `OPENSKY_CLIENT_SECRET` | empty | OpenSky OAuth2 client secret. Missing credentials use anonymous OpenSky lookup first. |
+| `OPENSKY_CREDENTIALS_FILE` | empty | Path to an OpenSky account `credentials.json` file with `clientId` and `clientSecret`. Env vars take precedence. |
 | `OPENSKY_BASE_URL` | `https://opensky-network.org/api` | Base URL for OpenSky state vectors. |
 | `OPENSKY_AUTH_URL` | OpenSky token endpoint | OAuth2 token URL. |
 | `SCHEDULE_PROVIDER` | `mock` | Schedule source: `mock`, `aviationstack`, or `flightaware`. |
@@ -142,7 +143,7 @@ Returns the cached route detail from the most recent `/search`. Returns `404` if
 
 ## Mock mode vs live mode
 
-The schedule provider defaults to mock route data. OpenSky live-state matching uses OAuth2 when `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` are set. If credentials are not set, the app still attempts anonymous OpenSky state-vector lookup with reduced rate limits; it falls back to mock state rows only when the OpenSky request fails. Live states are matched by leg callsign, so a route only receives full live confidence when every scheduled leg has a matching OpenSky state.
+The schedule provider defaults to mock route data. OpenSky live-state matching uses OAuth2 when `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` are set, or when `OPENSKY_CREDENTIALS_FILE` points to an OpenSky account JSON file. If credentials are not set, the app still attempts anonymous OpenSky state-vector lookup with reduced rate limits; it falls back to mock state rows only when the OpenSky request fails. Live states are matched by leg callsign, so a route only receives full live confidence when every scheduled leg has a matching OpenSky state.
 
 ## Add a schedule provider
 

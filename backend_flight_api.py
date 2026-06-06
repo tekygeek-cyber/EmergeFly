@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -234,7 +235,31 @@ def compute_overall_score(scores: dict[str, float], weights: dict[str, float]) -
 
 
 def opensky_live_ready() -> bool:
-    return bool(os.getenv("OPENSKY_CLIENT_ID") and os.getenv("OPENSKY_CLIENT_SECRET"))
+    client_id, client_secret = load_opensky_credentials()
+    return bool(client_id and client_secret)
+
+
+def load_opensky_credentials() -> tuple[str | None, str | None]:
+    """Load OAuth credentials from env vars or an OpenSky credentials JSON file."""
+    env_id = os.getenv("OPENSKY_CLIENT_ID")
+    env_secret = os.getenv("OPENSKY_CLIENT_SECRET")
+    if env_id and env_secret:
+        return env_id, env_secret
+
+    credentials_file = os.getenv("OPENSKY_CREDENTIALS_FILE")
+    if not credentials_file:
+        return None, None
+
+    try:
+        with Path(credentials_file).expanduser().open() as file:
+            data = json.load(file)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not load OPENSKY_CREDENTIALS_FILE: %s", exc)
+        return None, None
+
+    client_id = data.get("clientId") or data.get("client_id")
+    client_secret = data.get("clientSecret") or data.get("client_secret")
+    return client_id, client_secret
 
 
 async def get_opensky_token() -> str | None:
@@ -242,14 +267,15 @@ async def get_opensky_token() -> str | None:
     now = time.time()
     if _token_cache["access_token"] and float(_token_cache["expires_at"]) > now + 60:
         return str(_token_cache["access_token"])
-    if not opensky_live_ready():
+    client_id, client_secret = load_opensky_credentials()
+    if not client_id or not client_secret:
         return None
 
     auth_url = os.getenv("OPENSKY_AUTH_URL", DEFAULT_OPENSKY_AUTH_URL)
     payload = {
         "grant_type": "client_credentials",
-        "client_id": os.environ["OPENSKY_CLIENT_ID"],
-        "client_secret": os.environ["OPENSKY_CLIENT_SECRET"],
+        "client_id": client_id,
+        "client_secret": client_secret,
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:

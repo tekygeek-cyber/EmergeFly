@@ -6,6 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport
 
 from backend_flight_api import app
+from backend_flight_api import load_opensky_credentials
 
 
 @pytest.fixture
@@ -136,3 +137,13 @@ async def test_search_same_origin_destination_returns_422(client, future_window)
     )
 
     assert response.status_code == 422
+
+
+def test_load_opensky_credentials_file(monkeypatch, tmp_path):
+    credentials = tmp_path / "credentials.json"
+    credentials.write_text('{"clientId":"test-id","clientSecret":"test-secret"}')
+    monkeypatch.delenv("OPENSKY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("OPENSKY_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("OPENSKY_CREDENTIALS_FILE", str(credentials))
+
+    assert load_opensky_credentials() == ("test-id", "test-secret")
