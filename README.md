@@ -83,6 +83,7 @@ Request:
 ```json
 {
   "originIATA": "MLA",
+  "destinationIATA": "DEL",
   "emergencyProfile": "budget",
   "sortBy": "cost",
   "maxStops": 2,
@@ -96,7 +97,7 @@ Request:
 }
 ```
 
-`departWindow.startISO` and `departWindow.endISO` must both be in the future, and `endISO` must be after `startISO`.
+`originIATA` and `destinationIATA` must be different 3-letter IATA codes. `departWindow.startISO` and `departWindow.endISO` must both be in the future, and `endISO` must be after `startISO`.
 
 Response:
 
@@ -104,6 +105,7 @@ Response:
 {
   "queryId": "uuid",
   "originIATA": "MLA",
+  "destinationIATA": "DEL",
   "sortBy": "cost",
   "degradedMode": true,
   "warnings": ["OpenSky credentials missing - using mock live states."],

@@ -67,6 +67,7 @@ const buildPayload = () => {
 
   const payload = {
     originIATA: document.querySelector("#origin").value.trim().toUpperCase(),
+    destinationIATA: document.querySelector("#destination").value.trim().toUpperCase(),
     emergencyProfile: document.querySelector("#profile").value,
     maxStops: Number(document.querySelector("#maxStops").value),
     maxResults: Number(document.querySelector("#maxResults").value),
@@ -76,6 +77,10 @@ const buildPayload = () => {
       endISO: end.toISOString(),
     },
   };
+
+  if (payload.originIATA === payload.destinationIATA) {
+    throw new Error("Destination must be different from origin.");
+  }
 
   const maxPrice = Number.parseFloat(document.querySelector("#maxPrice").value);
   const maxDuration = Number.parseInt(document.querySelector("#maxDuration").value, 10);
@@ -110,7 +115,7 @@ const renderKpis = (routes) => {
 };
 
 const renderRoutes = (payload) => {
-  modeStatus.textContent = `${payload.degradedMode ? "Degraded" : "Live"} · sorted by ${payload.sortBy}`;
+  modeStatus.textContent = `${payload.degradedMode ? "Mock/degraded" : "Live OpenSky"} · ${payload.originIATA} to ${payload.destinationIATA} · sorted by ${payload.sortBy}`;
   renderWarnings(payload.warnings);
   renderKpis(payload.results);
 

@@ -88,6 +88,7 @@ class TimeWindow(BaseModel):
 
 class SearchRequest(BaseModel):
     originIATA: str = "MLA"
+    destinationIATA: str = "DEL"
     departWindow: TimeWindow
     maxStops: int = Field(default=2, ge=0, le=3)
     maxResults: int = Field(default_factory=lambda: env_int("MAX_RESULTS", 5), ge=1, le=25)
@@ -96,13 +97,19 @@ class SearchRequest(BaseModel):
     maxPriceUSD: float | None = Field(default=None, gt=0)
     maxDurationMin: int | None = Field(default=None, gt=0)
 
-    @field_validator("originIATA")
+    @field_validator("originIATA", "destinationIATA")
     @classmethod
     def validate_iata(cls, value: str) -> str:
         normalized = value.strip().upper()
         if not re.fullmatch(r"[A-Z]{3}", normalized):
-            raise ValueError("originIATA must be a 3-letter IATA code")
+            raise ValueError("IATA codes must be 3 uppercase letters")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_route_airports(self) -> "SearchRequest":
+        if self.originIATA == self.destinationIATA:
+            raise ValueError("destinationIATA must be different from originIATA")
+        return self
 
     @field_validator("emergencyProfile")
     @classmethod
@@ -176,6 +183,7 @@ class SearchResponse(BaseModel):
     queryId: str
     generatedAt: datetime
     originIATA: str
+    destinationIATA: str
     sortBy: str
     degradedMode: bool
     warnings: list[str]
@@ -383,6 +391,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
     """Create deterministic mock routes whose times are derived from the search window."""
     start = request.departWindow.startISO
     origin = request.originIATA
+    destination = request.destinationIATA
     return [
         build_route(
             "R-001",
@@ -390,7 +399,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             0.90,
             0.03,
             18,
-            [leg("AI101", "Air India", origin, "DEL", start + timedelta(minutes=30), 480, "B787-9")],
+            [leg("AI101", "Air India", origin, destination, start + timedelta(minutes=30), 480, "B787-9")],
             "mock",
         ),
         build_route(
@@ -401,7 +410,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             22,
             [
                 leg("TK721", "Turkish Airlines", origin, "IST", start + timedelta(minutes=45), 150, "A321"),
-                leg("TK716", "Turkish Airlines", "IST", "DEL", start + timedelta(minutes=45 + 150 + 120), 510, "A330"),
+                leg("TK716", "Turkish Airlines", "IST", destination, start + timedelta(minutes=45 + 150 + 120), 510, "A330"),
             ],
             "mock",
         ),
@@ -413,7 +422,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             36,
             [
                 leg("EK112", "Emirates", origin, "DXB", start + timedelta(minutes=50), 410, "B777"),
-                leg("EK512", "Emirates", "DXB", "DEL", start + timedelta(minutes=50 + 410 + 45), 85, "B777"),
+                leg("EK512", "Emirates", "DXB", destination, start + timedelta(minutes=50 + 410 + 45), 85, "B777"),
             ],
             "mock",
         ),
@@ -423,7 +432,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             0.93,
             0.01,
             12,
-            [leg("LH765", "Lufthansa", origin, "BLR", start + timedelta(minutes=90), 480, "A350")],
+            [leg("LH765", "Lufthansa", origin, destination, start + timedelta(minutes=90), 480, "A350")],
             "mock",
         ),
         build_route(
@@ -435,7 +444,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             [
                 leg("A3621", "Aegean", origin, "ATH", start + timedelta(minutes=120), 95, "A320"),
                 leg("AI172", "Air India", "ATH", "BOM", start + timedelta(minutes=120 + 95 + 150), 465, "B787"),
-                leg("AI241", "Air India", "BOM", "DEL", start + timedelta(minutes=120 + 95 + 150 + 465 + 110), 110, "A320"),
+                leg("AI241", "Air India", "BOM", destination, start + timedelta(minutes=120 + 95 + 150 + 465 + 110), 110, "A320"),
             ],
             "mock",
         ),
@@ -447,7 +456,7 @@ def build_mock_schedule(request: SearchRequest) -> list[dict[str, Any]]:
             28,
             [
                 leg("KM614", "KM Malta Airlines", origin, "FCO", start + timedelta(minutes=75), 85, "A320"),
-                leg("AI148", "Air India", "FCO", "DEL", start + timedelta(minutes=75 + 85 + 135), 585, "B787"),
+                leg("AI148", "Air India", "FCO", destination, start + timedelta(minutes=75 + 85 + 135), 585, "B787"),
             ],
             "mock",
         ),
@@ -578,6 +587,7 @@ async def run_search(request: SearchRequest) -> SearchResponse:
             queryId=str(uuid4()),
             generatedAt=utc_now(),
             originIATA=request.originIATA,
+            destinationIATA=request.destinationIATA,
             sortBy=request.sortBy,
             degradedMode=True,
             warnings=warnings,
@@ -649,6 +659,7 @@ async def run_search(request: SearchRequest) -> SearchResponse:
         queryId=str(uuid4()),
         generatedAt=utc_now(),
         originIATA=request.originIATA,
+        destinationIATA=request.destinationIATA,
         sortBy=request.sortBy,
         degradedMode=degraded,
         warnings=warnings,
