@@ -33,7 +33,11 @@ async def test_health_returns_ok(client):
     response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "routes_cached" in data
+    assert "opensky_live_ready" in data
+    assert "profiles_available" in data
 
 
 @pytest.mark.asyncio
@@ -147,3 +151,214 @@ def test_load_opensky_credentials_file(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENSKY_CREDENTIALS_FILE", str(credentials))
 
     assert load_opensky_credentials() == ("test-id", "test-secret")
+
+
+@pytest.mark.asyncio
+async def test_search_sort_speed_ascending(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "sortBy": "speed",
+            "departWindow": future_window,
+        },
+    )
+
+    durations = [route["totalDurationMin"] for route in response.json()["results"]]
+    assert response.status_code == 200
+    assert durations == sorted(durations)
+
+
+@pytest.mark.asyncio
+async def test_search_sort_balanced_descending_score(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "sortBy": "balanced",
+            "departWindow": future_window,
+        },
+    )
+
+    scores = [route["overallScore"] for route in response.json()["results"]]
+    assert response.status_code == 200
+    assert scores == sorted(scores, reverse=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["balanced", "budget", "fastest", "medical", "family", "evac"])
+async def test_all_profiles_return_results(client, future_window, profile):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "emergencyProfile": profile,
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"]
+
+
+@pytest.mark.asyncio
+async def test_max_price_filter(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "maxPriceUSD": 650,
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 200
+    assert all(route["priceUSD"] <= 650 for route in response.json()["results"])
+
+
+@pytest.mark.asyncio
+async def test_max_duration_filter(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "maxDurationMin": 600,
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 200
+    assert all(route["totalDurationMin"] <= 600 for route in response.json()["results"])
+
+
+@pytest.mark.asyncio
+async def test_invalid_sort_by_returns_422(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "sortBy": "price_asc_plz",
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_max_stops_out_of_range_returns_422(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "maxStops": 9,
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_injection_iata_returns_422(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA; DROP TABLE routes",
+            "destinationIATA": "DEL",
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_route_detail_after_search(client, future_window):
+    await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "departWindow": future_window,
+        },
+    )
+    response = await client.get("/route/R-001")
+
+    assert response.status_code == 200
+    assert "scores" in response.json()
+    assert response.json()["legs"]
+
+
+@pytest.mark.asyncio
+async def test_cost_rank_1_is_cheapest(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "maxResults": 10,
+            "departWindow": future_window,
+        },
+    )
+
+    results = response.json()["results"]
+    rank1 = next(route for route in results if route["costRank"] == 1)
+    assert all(rank1["priceUSD"] <= route["priceUSD"] for route in results)
+
+
+@pytest.mark.asyncio
+async def test_speed_rank_1_is_fastest(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "maxResults": 10,
+            "departWindow": future_window,
+        },
+    )
+
+    results = response.json()["results"]
+    rank1 = next(route for route in results if route["speedRank"] == 1)
+    assert all(rank1["totalDurationMin"] <= route["totalDurationMin"] for route in results)
+
+
+@pytest.mark.asyncio
+async def test_scores_and_confidence_are_bounded(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 200
+    for route in response.json()["results"]:
+        assert 0.0 <= route["confidence"] <= 100.0
+        for value in route["scores"].values():
+            assert 0.0 <= value <= 100.0
+
+
+@pytest.mark.asyncio
+async def test_forced_mock_states_sets_degraded_mode(client, future_window):
+    response = await client.post(
+        "/search",
+        json={
+            "originIATA": "MLA",
+            "destinationIATA": "DEL",
+            "departWindow": future_window,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["degradedMode"] is True

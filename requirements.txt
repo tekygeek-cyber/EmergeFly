@@ -11,3 +11,8 @@ httpx==0.28.1
 # Test runner and async test support
 pytest==9.0.3
 pytest-asyncio==1.4.0
+hypothesis==6.155.2
+
+# Optional browser and load testing tools
+pytest-playwright==0.8.0
+locust==2.44.1

@@ -216,11 +216,13 @@ def compute_delay_risk(p_ontime: float, avg_delay_min: float) -> float:
 
 
 def compute_cost_score(price: float, min_price: float, max_price: float) -> float:
-    return round(clamp(100 * (1 - (price - min_price) / (max_price - min_price + 1e-5))), 4)
+    spread = max(max_price - min_price, 0.0)
+    return round(clamp(100 * (1 - (price - min_price) / (spread + 1e-5))), 4)
 
 
 def compute_duration_score(duration_min: int, min_dur: int, max_dur: int) -> float:
-    return round(clamp(100 * (1 - (duration_min - min_dur) / (max_dur - min_dur + 1e-5))), 4)
+    spread = max(max_dur - min_dur, 0)
+    return round(clamp(100 * (1 - (duration_min - min_dur) / (spread + 1e-5))), 4)
 
 
 def compute_overall_score(scores: dict[str, float], weights: dict[str, float]) -> float:

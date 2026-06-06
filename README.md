@@ -157,6 +157,27 @@ pytest
 
 The test suite covers `/health`, valid and invalid `/search` requests, past date validation, low-price empty results, MCT pruning warnings, and `/route/{id}` 404 behavior.
 
+Additional verification:
+
+```bash
+# Unit scoring formulas
+pytest test_scoring.py -v
+
+# API integration and data integrity
+OPENSKY_USE_MOCK_STATES=1 pytest test_backend.py -v
+
+# Boundary fuzz tests
+pytest test_fuzz.py -v --hypothesis-seed=0
+
+# Optional frontend E2E, with the FastAPI server already running
+RUN_FRONTEND_E2E=1 pytest test_frontend.py -v
+
+# Optional load test
+locust -f locustfile.py --host=http://127.0.0.1:8080 --users 50 --spawn-rate 5 --run-time 60s --headless
+```
+
+Load-test targets are zero `500` responses, error rate below `0.5%`, `/search` p95 latency below `300ms`, and stable behavior for invalid input under concurrency.
+
 ## Deploy to a VPS
 
 Install Python 3.10 or later, clone the repository, create a virtual environment, and install `requirements.txt`. Run the backend behind nginx:
