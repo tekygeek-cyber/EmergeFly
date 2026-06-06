@@ -116,7 +116,10 @@ const renderKpis = (routes) => {
 
 const renderRoutes = (payload) => {
   modeStatus.textContent = `${payload.degradedMode ? "Mock/degraded" : "Live OpenSky"} · ${payload.originIATA} to ${payload.destinationIATA} · sorted by ${payload.sortBy}`;
-  renderWarnings(payload.warnings);
+  renderWarnings([
+    ...payload.warnings,
+    "Route prices are schedule-provider values, not live fare quotes. Compare with a fare provider before booking.",
+  ]);
   renderKpis(payload.results);
 
   if (!payload.results.length) {
@@ -161,6 +164,14 @@ const renderRoutes = (payload) => {
 };
 
 const loadRouteDetail = async (routeId, button) => {
+  const card = button.closest(".route-card");
+  const existing = card.querySelector(".route-detail");
+  if (existing) {
+    existing.remove();
+    button.textContent = "Details";
+    return;
+  }
+
   button.disabled = true;
   try {
     const response = await fetch(`/route/${encodeURIComponent(routeId)}`);
@@ -168,16 +179,65 @@ const loadRouteDetail = async (routeId, button) => {
       throw new Error(`Route lookup failed with ${response.status}`);
     }
     const route = await response.json();
-    const live = route.dataCompleteness;
-    button.insertAdjacentHTML(
-      "beforebegin",
-      `<span class="badge">${live.matchedLiveLegs}/${live.totalLegs} live state matches · ${live.liveState}</span>`
-    );
+    button.insertAdjacentHTML("beforebegin", renderRouteDetail(route));
+    button.textContent = "Hide details";
   } catch (error) {
     button.insertAdjacentHTML("beforebegin", '<span class="risk">Detail unavailable</span>');
   } finally {
     button.disabled = false;
   }
+};
+
+const renderRouteDetail = (route) => {
+  const live = route.dataCompleteness;
+  const rows = route.legs
+    .map((leg, index) => {
+      const nextLeg = route.legs[index + 1];
+      const connection = nextLeg
+        ? Math.round((new Date(nextLeg.departureISO) - new Date(leg.arrivalISO)) / 60000)
+        : null;
+      const liveState = leg.liveState;
+      return `
+        <div class="leg-row">
+          <div>
+            <strong>${leg.flightNumber} · ${leg.origin} to ${leg.destination}</strong>
+            <span>${leg.airline} · ${leg.aircraft}</span>
+          </div>
+          <div>
+            <strong>${formatTime(leg.departureISO)}</strong>
+            <span>Depart</span>
+          </div>
+          <div>
+            <strong>${formatTime(leg.arrivalISO)}</strong>
+            <span>Arrive</span>
+          </div>
+          <div>
+            <strong>${minutesLabel(leg.durationMin)}</strong>
+            <span>Flight time</span>
+          </div>
+          <div>
+            <strong>${liveState ? liveState.source : "missing"}</strong>
+            <span>${liveState?.fresh ? "Fresh live match" : "No fresh live match"}</span>
+          </div>
+        </div>
+        ${
+          connection !== null
+            ? `<div class="connection-row"><span>Connection in ${leg.destination}</span><strong>· ${minutesLabel(connection)}</strong></div>`
+            : ""
+        }
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="route-detail">
+      <div class="detail-summary">
+        <span>${live.matchedLiveLegs}/${live.totalLegs} live state matches · ${live.liveState}</span>
+        <span>Cost rank #${route.costRank} · Speed rank #${route.speedRank}</span>
+      </div>
+      ${rows}
+    </section>
+  `;
 };
 
 const submitSearch = async (event) => {
