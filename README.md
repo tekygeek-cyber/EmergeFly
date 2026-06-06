@@ -19,16 +19,43 @@ repo/
 └── README.md
 ```
 
-## Quickstart
+## Run the program
 
 ```bash
+# 1. Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Start the app on the default port, 8080
 python backend_flight_api.py
 ```
 
 Open `http://127.0.0.1:8080`.
+
+To run with your OpenSky credentials file:
+
+```bash
+OPENSKY_CREDENTIALS_FILE=/path/to/credentials.json python backend_flight_api.py
+```
+
+To change the port:
+
+```bash
+PORT=9090 python backend_flight_api.py
+```
+
+Then open `http://127.0.0.1:9090`.
+
+You can also start the app directly with Uvicorn:
+
+```bash
+uvicorn backend_flight_api:app --host 127.0.0.1 --port 8080
+```
+
+If port `8080` is already in use, either stop the existing server or choose another port with `PORT=9090`.
 
 ## Environment variables
 
