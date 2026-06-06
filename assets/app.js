@@ -39,7 +39,7 @@ const checkHealth = async () => {
     const data = await response.json();
     healthStatus.textContent =
       data.status === "ok"
-        ? `Service online · OpenSky ${data.opensky_live_ready ? "ready" : "mock mode"}`
+        ? `Service online · OpenSky ${data.opensky_live_ready ? "OAuth ready" : "anonymous live lookup"}`
         : "Service unavailable";
     modeStatus.textContent = `Provider: ${data.schedule_provider} · Profiles: ${data.profiles_available.length}`;
   } catch (error) {

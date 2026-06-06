@@ -15,6 +15,11 @@ def future_window() -> dict[str, str]:
     return {"startISO": start.isoformat(), "endISO": end.isoformat()}
 
 
+@pytest.fixture(autouse=True)
+def force_mock_states(monkeypatch):
+    monkeypatch.setenv("OPENSKY_USE_MOCK_STATES", "1")
+
+
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)

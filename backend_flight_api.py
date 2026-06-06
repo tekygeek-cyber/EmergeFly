@@ -298,29 +298,35 @@ def mock_opensky_state_rows() -> list[list[Any]]:
 
 async def fetch_opensky_states(callsigns: set[str]) -> tuple[dict[str, LiveState], bool, list[str]]:
     """Return OpenSky states keyed by callsign, matching live data to scheduled legs."""
+    if os.getenv("OPENSKY_USE_MOCK_STATES") == "1":
+        states = {
+            state.callsign: state
+            for state in (map_opensky_state(row, "mock") for row in mock_opensky_state_rows())
+            if state.callsign in callsigns
+        }
+        return states, True, ["OpenSky mock state mode forced by environment."]
+
     token = await get_opensky_token()
     degraded = False
     warnings: list[str] = []
     source: Literal["opensky", "mock"] = "opensky"
 
-    if token:
-        base_url = os.getenv("OPENSKY_BASE_URL", DEFAULT_OPENSKY_BASE_URL).rstrip("/")
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.get(f"{base_url}/states/all", headers={"Authorization": f"Bearer {token}"})
-                response.raise_for_status()
-                rows = response.json().get("states") or []
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("OpenSky state request failed: %s", exc)
-            rows = mock_opensky_state_rows()
-            source = "mock"
-            degraded = True
-            warnings.append("OpenSky request failed - using mock live states.")
-    else:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    if not token:
+        warnings.append("OpenSky credentials missing - trying anonymous live state lookup.")
+
+    base_url = os.getenv("OPENSKY_BASE_URL", DEFAULT_OPENSKY_BASE_URL).rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(f"{base_url}/states/all", headers=headers)
+            response.raise_for_status()
+            rows = response.json().get("states") or []
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("OpenSky state request failed: %s", exc)
         rows = mock_opensky_state_rows()
         source = "mock"
         degraded = True
-        warnings.append("OpenSky credentials missing - using mock live states.")
+        warnings.append("OpenSky request failed - using mock live states.")
 
     states: dict[str, LiveState] = {}
     for row in rows:

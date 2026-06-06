@@ -1,6 +1,6 @@
 # EmergeFly 2.0
 
-EmergeFly is a FastAPI flight optimizer for urgent travel planning. Version 2.0 ranks routes by cost, speed, reliability, delay risk, and connection safety, validates that search windows are not in the past, and matches scheduled legs with OpenSky live-state callsigns when credentials are available.
+EmergeFly is a FastAPI flight optimizer for urgent travel planning. Version 2.0 ranks routes by cost, speed, reliability, delay risk, and connection safety, validates that search windows are not in the past, and matches scheduled legs with OpenSky live-state callsigns using OAuth credentials or anonymous OpenSky lookup.
 
 ## Folder structure
 
@@ -34,8 +34,8 @@ Open `http://127.0.0.1:8080`.
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `OPENSKY_CLIENT_ID` | empty | OpenSky OAuth2 client ID. Missing credentials trigger mock live-state mode. |
-| `OPENSKY_CLIENT_SECRET` | empty | OpenSky OAuth2 client secret. Missing credentials trigger mock live-state mode. |
+| `OPENSKY_CLIENT_ID` | empty | OpenSky OAuth2 client ID. Missing credentials use anonymous OpenSky lookup first. |
+| `OPENSKY_CLIENT_SECRET` | empty | OpenSky OAuth2 client secret. Missing credentials use anonymous OpenSky lookup first. |
 | `OPENSKY_BASE_URL` | `https://opensky-network.org/api` | Base URL for OpenSky state vectors. |
 | `OPENSKY_AUTH_URL` | OpenSky token endpoint | OAuth2 token URL. |
 | `SCHEDULE_PROVIDER` | `mock` | Schedule source: `mock`, `aviationstack`, or `flightaware`. |
@@ -108,7 +108,7 @@ Response:
   "destinationIATA": "DEL",
   "sortBy": "cost",
   "degradedMode": true,
-  "warnings": ["OpenSky credentials missing - using mock live states."],
+  "warnings": ["OpenSky credentials missing - trying anonymous live state lookup."],
   "results": [
     {
       "routeId": "R-002",
@@ -142,7 +142,7 @@ Returns the cached route detail from the most recent `/search`. Returns `404` if
 
 ## Mock mode vs live mode
 
-The schedule provider defaults to mock route data. OpenSky live-state matching uses OAuth2 when `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` are set; otherwise the app falls back to mock state rows and marks the response as degraded. Live states are matched by leg callsign, so a route only receives full live confidence when every scheduled leg has a matching OpenSky state.
+The schedule provider defaults to mock route data. OpenSky live-state matching uses OAuth2 when `OPENSKY_CLIENT_ID` and `OPENSKY_CLIENT_SECRET` are set. If credentials are not set, the app still attempts anonymous OpenSky state-vector lookup with reduced rate limits; it falls back to mock state rows only when the OpenSky request fails. Live states are matched by leg callsign, so a route only receives full live confidence when every scheduled leg has a matching OpenSky state.
 
 ## Add a schedule provider
 
