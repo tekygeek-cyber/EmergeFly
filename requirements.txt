@@ -1,0 +1,9 @@
+# Web API framework and data validation
+fastapi==0.136.3
+pydantic==2.13.4
+
+# ASGI server for local and production runs
+uvicorn==0.49.0
+
+# Async HTTP client for OpenSky OAuth2 and live state calls
+httpx==0.28.1

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EmergeFly Flight Dashboard</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="toolbar">
+        <div>
+          <p class="eyebrow">Emergency flight scanner</p>
+          <h1>EmergeFly</h1>
+        </div>
+        <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode">
+          <span aria-hidden="true">◐</span>
+        </button>
+      </section>
+
+      <form class="search-panel" id="searchForm">
+        <label>
+          Origin
+          <input id="origin" name="origin" maxlength="4" value="MLA" required />
+        </label>
+        <label>
+          Destination
+          <input id="destination" name="destination" maxlength="4" value="FCO" required />
+        </label>
+        <label>
+          Departure
+          <input id="departureTime" name="departureTime" type="datetime-local" required />
+        </label>
+        <label>
+          Arrive by
+          <input id="arrivalTime" name="arrivalTime" type="datetime-local" required />
+        </label>
+        <label>
+          Priority
+          <select id="priority" name="priority">
+            <option value="medical">Medical</option>
+            <option value="evacuation">Evacuation</option>
+            <option value="critical">Critical</option>
+            <option value="standard">Standard</option>
+          </select>
+        </label>
+        <button class="primary-button" type="submit">Search</button>
+      </form>
+
+      <section class="status-row" aria-live="polite">
+        <span id="healthStatus">Checking service...</span>
+        <span id="modeStatus"></span>
+      </section>
+
+      <section class="results-grid" id="results" aria-live="polite"></section>
+    </main>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
